@@ -6,6 +6,26 @@ import (
 	"net"
 )
 
+type Tile uint32
+
+const (
+	Empty Tile = iota
+	Cross
+	Nought
+)
+
+// Game ..
+type Game struct {
+	board   [][]Tile
+	playerA Client
+	playerB Client
+}
+
+// CreateGame ...
+func CreateGame(playerA, playerB Client) Game {
+	return Game{}
+}
+
 // Client ...
 type Client struct {
 	id      int32
