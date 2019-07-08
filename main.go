@@ -38,28 +38,28 @@ func CreateGame(playerA, playerB Client) Game {
 }
 
 type Player struct {
-	name string
+	name  string
+	state ClientState
 }
 
 // Client ...
 type Client struct {
-	state      ClientState
-	id         int32
-	outgoing   chan string
-	incoming   chan string
-	disconnect chan bool
-	player     Player
+	id       int32
+	outgoing chan string
+	incoming chan string
+	player   *Player
 }
 
 // CreateClient ...
 func CreateClient(conn net.Conn) Client {
 	client := Client{
-		player:     Player{},
-		id:         rand.Int31(),
-		state:      Introduce,
-		outgoing:   make(chan string, 4),
-		incoming:   make(chan string, 4),
-		disconnect: make(chan bool, 1),
+		player: &Player{
+			name:  "--",
+			state: Introduce,
+		},
+		id:       rand.Int31(),
+		outgoing: make(chan string, 4),
+		incoming: make(chan string, 4),
 	}
 	go client.Writer(conn)
 	go client.Reader(conn)
@@ -74,9 +74,6 @@ func (client Client) Writer(conn net.Conn) {
 		case msg := <-client.outgoing:
 			writer.Write([]byte(msg))
 			writer.Flush()
-		case <-client.disconnect:
-			fmt.Println("End of Writer goroutine for ", client.id)
-			break
 		}
 	}
 }
@@ -94,73 +91,110 @@ func parseClientMessage(message string) (ClientMessage, error) {
 }
 
 // Reader ...
-func (client Client) Reader(conn net.Conn) {
+func (client *Client) Reader(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			fmt.Println("End of REader goroutine for ", client.id)
+			fmt.Println("End of Reader goroutine for ", client.id)
 			break
 		}
 		message, err := parseClientMessage(line)
 		if err != nil {
 			client.outgoing <- "Sorry, I don't understand that!\n"
 		} else {
-			switch client.state {
+			switch client.player.state {
 			case Introduce:
-				client.player.name = message.body
-				client.outgoing <- fmt.Sprintf("Hello %s\n", client.player.name)
-				client.outgoing <- "Welcome to the lobby!\n"
-				client.state = Lobby
+				switch message.command {
+				case "name":
+					client.player.name = message.body
+					client.outgoing <- fmt.Sprintf("Hello %s\n", client.player.name)
+					client.outgoing <- "Welcome to the lobby!\n"
+					client.player.state = Lobby
+				}
 				break
+			case Lobby:
+				switch message.command {
+				case "play":
+					client.player.state = SearchForGame
+					client.outgoing <- "Looking a challenger for you..."
+					lookingForGameChannel <- client.id
+				}
+			case Play:
+				fmt.Println("Player the game!")
 			default:
 				fmt.Println("Default: ", message)
 			}
 		}
-
-		// fmt.Println(client.id, " says ", line)
-		// fmt.Println(message)
 	}
 }
 
 func (client Client) willDisconnect() {
-	client.disconnect <- true
+	close(client.incoming)
+	close(client.outgoing)
 }
 
-func hasEnoughPoolingClients(conns []Client) bool {
-	counter := 0
-	for _, client := range conns {
-		if client.state == SearchForGame {
-			counter++
+var lookingForGameChannel = make(chan int32, 1)
+var connections = make([]Client, 0)
+
+func searchChallengerFor(id int32) (int32, bool) {
+	for _, client := range connections {
+		fmt.Println("dbg ", client)
+		if client.player.state == SearchForGame && client.id != id {
+			return client.id, true
 		}
 	}
-	return counter >= 2
+
+	return 0, false
 }
 
-func findTwoPoolingClients(conns *[]Client) (first int32, second int32) {
-	for _, client := range *conns {
-		if first != 0 && second != 0 {
-			break
+func getClientForId(id int32) (Client, bool) {
+	for _, client := range connections {
+		if client.id == id {
+			return client, true
 		}
+	}
+	return Client{}, false
+}
 
-		if client.state == SearchForGame {
-			if first == 0 {
-				first = client.id
-			} else if second == 0 {
-				second = client.id
+func matchClientsSearchingForGame() {
+	for {
+		select {
+		case clientID := <-lookingForGameChannel:
+			opponentClientID, ok := searchChallengerFor(clientID)
+			if ok {
+				fmt.Println("Matched with ", opponentClientID)
+				clientA, ok := getClientForId(clientID)
+				if ok == false {
+					panic("Client id didn't match with client")
+				}
+				clientB, ok := getClientForId(opponentClientID)
+				if ok == false {
+					panic("Opponent id didn't match with client")
+				}
+
+				clientA.player.state = Play
+				clientB.player.state = Play
+
+				clientA.outgoing <- fmt.Sprintf("The match is starting with %s\n", clientB.player.name)
+				clientB.outgoing <- fmt.Sprintf("The match is starting with %s\n", clientA.player.name)
+
+				fmt.Printf("Start match between %v and %v", clientA, clientB)
+			} else {
+				fmt.Println("No opponent available")
 			}
 		}
 	}
-	return
 }
 
 func main() {
 	fmt.Println("Starting up")
 
-	connections := make([]Client, 0)
-
 	listener, _ := net.Listen("tcp", ":8081")
 	defer listener.Close()
+
+	go matchClientsSearchingForGame()
+	defer func() { close(lookingForGameChannel) }()
 
 	for {
 		conn, _ := listener.Accept()
@@ -169,18 +203,5 @@ func main() {
 		connections = append(connections, newClient)
 		newClient.outgoing <- "Welcome to Ticky Tacky Tocky World\n"
 		newClient.outgoing <- "What's your name?\n"
-
-		// if hasEnoughPoolingClients(connections) {
-		// 	f, s := findTwoPoolingClients(&connections)
-		// 	fmt.Printf("Game between %v and %v\n", f, s)
-		// 	for _, client := range connections {
-		// 		client.outgoing <- "Game starting\n"
-		// 	}
-		// } else {
-		// 	fmt.Println("Not enough clients yet")
-		// 	for _, client := range connections {
-		// 		client.outgoing <- "Waiting for others\n"
-		// 	}
-		// }
 	}
 }
