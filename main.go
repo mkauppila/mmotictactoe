@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"math/rand"
 	"net"
@@ -28,15 +29,57 @@ func CreateGame(playerA, playerB Client) Game {
 
 // Client ...
 type Client struct {
-	id      int32
-	conn    *net.Conn
-	pooling bool
+	id         int32
+	conn       net.Conn
+	writer     *bufio.Writer
+	reader     *bufio.Reader
+	pooling    bool
+	outgoing   chan string
+	incoming   chan string
+	disconnect chan bool
 }
 
 // CreateClient ...
-func CreateClient(conn *net.Conn) (client Client) {
-	client = Client{id: rand.Int31(), conn: conn, pooling: true}
-	return
+func CreateClient(conn net.Conn) Client {
+	client := Client{
+		id:         rand.Int31(),
+		conn:       conn,
+		pooling:    true,
+		writer:     bufio.NewWriter(conn),
+		reader:     bufio.NewReader(conn),
+		outgoing:   make(chan string, 4),
+		incoming:   make(chan string, 4),
+		disconnect: make(chan bool, 1),
+	}
+	go client.Writer()
+	go client.Reader()
+	return client
+}
+
+// Writer ...
+func (client Client) Writer() {
+	for {
+		select {
+		case msg := <-client.outgoing:
+			client.writer.Write([]byte(msg))
+			client.writer.Flush()
+		case <-client.disconnect:
+			fmt.Println("End of Writer goroutine for ", client.id)
+			break
+		}
+	}
+}
+
+// Reader ...
+func (client Client) Reader() {
+	for {
+		line, _ := client.reader.ReadString('\n')
+		fmt.Println(client.id, " says ", line)
+	}
+}
+
+func (client Client) willDisconnect() {
+	client.disconnect <- true
 }
 
 func hasEnoughPoolingClients(conns []Client) bool {
@@ -77,15 +120,21 @@ func main() {
 
 	for {
 		conn, _ := listener.Accept()
-		newClient := CreateClient(&conn)
+		newClient := CreateClient(conn)
 		fmt.Println("New client ", newClient)
 		connections = append(connections, newClient)
 
 		if hasEnoughPoolingClients(connections) {
 			f, s := findTwoPoolingClients(&connections)
 			fmt.Printf("Game between %v and %v\n", f, s)
+			for _, client := range connections {
+				client.outgoing <- "Game starting\n"
+			}
 		} else {
 			fmt.Println("Not enough clients yet")
+			for _, client := range connections {
+				client.outgoing <- "Waiting for others\n"
+			}
 		}
 	}
 }
