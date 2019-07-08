@@ -45,9 +45,6 @@ type Player struct {
 type Client struct {
 	state      ClientState
 	id         int32
-	conn       net.Conn
-	writer     *bufio.Writer
-	reader     *bufio.Reader
 	outgoing   chan string
 	incoming   chan string
 	disconnect chan bool
@@ -59,26 +56,24 @@ func CreateClient(conn net.Conn) Client {
 	client := Client{
 		player:     Player{},
 		id:         rand.Int31(),
-		conn:       conn,
 		state:      Introduce,
-		writer:     bufio.NewWriter(conn),
-		reader:     bufio.NewReader(conn),
 		outgoing:   make(chan string, 4),
 		incoming:   make(chan string, 4),
 		disconnect: make(chan bool, 1),
 	}
-	go client.Writer()
-	go client.Reader()
+	go client.Writer(conn)
+	go client.Reader(conn)
 	return client
 }
 
 // Writer ...
-func (client Client) Writer() {
+func (client Client) Writer(conn net.Conn) {
+	writer := bufio.NewWriter(conn)
 	for {
 		select {
 		case msg := <-client.outgoing:
-			client.writer.Write([]byte(msg))
-			client.writer.Flush()
+			writer.Write([]byte(msg))
+			writer.Flush()
 		case <-client.disconnect:
 			fmt.Println("End of Writer goroutine for ", client.id)
 			break
@@ -99,9 +94,10 @@ func parseClientMessage(message string) (ClientMessage, error) {
 }
 
 // Reader ...
-func (client Client) Reader() {
+func (client Client) Reader(conn net.Conn) {
+	reader := bufio.NewReader(conn)
 	for {
-		line, err := client.reader.ReadString('\n')
+		line, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Println("End of REader goroutine for ", client.id)
 			break
