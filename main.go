@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 )
 
 type Tile uint32
@@ -13,6 +14,15 @@ const (
 	Empty Tile = iota
 	Cross
 	Nought
+)
+
+type ClientState uint32
+
+const (
+	Introduce ClientState = iota
+	Lobby
+	SearchForGame
+	Play
 )
 
 // Game ..
@@ -27,24 +37,30 @@ func CreateGame(playerA, playerB Client) Game {
 	return Game{}
 }
 
+type Player struct {
+	name string
+}
+
 // Client ...
 type Client struct {
+	state      ClientState
 	id         int32
 	conn       net.Conn
 	writer     *bufio.Writer
 	reader     *bufio.Reader
-	pooling    bool
 	outgoing   chan string
 	incoming   chan string
 	disconnect chan bool
+	player     Player
 }
 
 // CreateClient ...
 func CreateClient(conn net.Conn) Client {
 	client := Client{
+		player:     Player{},
 		id:         rand.Int31(),
 		conn:       conn,
-		pooling:    true,
+		state:      Introduce,
 		writer:     bufio.NewWriter(conn),
 		reader:     bufio.NewReader(conn),
 		outgoing:   make(chan string, 4),
@@ -70,11 +86,44 @@ func (client Client) Writer() {
 	}
 }
 
+type ClientMessage struct {
+	command, body string
+}
+
+func parseClientMessage(message string) (ClientMessage, error) {
+	splits := strings.SplitN(message, " ", 2)
+	if len(splits) != 2 {
+		return ClientMessage{}, fmt.Errorf("Invalid client message: %v", message)
+	}
+	return ClientMessage{command: splits[0], body: splits[1]}, nil
+}
+
 // Reader ...
 func (client Client) Reader() {
 	for {
-		line, _ := client.reader.ReadString('\n')
-		fmt.Println(client.id, " says ", line)
+		line, err := client.reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("End of REader goroutine for ", client.id)
+			break
+		}
+		message, err := parseClientMessage(line)
+		if err != nil {
+			client.outgoing <- "Sorry, I don't understand that!\n"
+		} else {
+			switch client.state {
+			case Introduce:
+				client.player.name = message.body
+				client.outgoing <- fmt.Sprintf("Hello %s\n", client.player.name)
+				client.outgoing <- "Welcome to the lobby!\n"
+				client.state = Lobby
+				break
+			default:
+				fmt.Println("Default: ", message)
+			}
+		}
+
+		// fmt.Println(client.id, " says ", line)
+		// fmt.Println(message)
 	}
 }
 
@@ -85,9 +134,8 @@ func (client Client) willDisconnect() {
 func hasEnoughPoolingClients(conns []Client) bool {
 	counter := 0
 	for _, client := range conns {
-		if client.pooling {
+		if client.state == SearchForGame {
 			counter++
-
 		}
 	}
 	return counter >= 2
@@ -99,7 +147,7 @@ func findTwoPoolingClients(conns *[]Client) (first int32, second int32) {
 			break
 		}
 
-		if client.pooling {
+		if client.state == SearchForGame {
 			if first == 0 {
 				first = client.id
 			} else if second == 0 {
@@ -123,18 +171,20 @@ func main() {
 		newClient := CreateClient(conn)
 		fmt.Println("New client ", newClient)
 		connections = append(connections, newClient)
+		newClient.outgoing <- "Welcome to Ticky Tacky Tocky World\n"
+		newClient.outgoing <- "What's your name?\n"
 
-		if hasEnoughPoolingClients(connections) {
-			f, s := findTwoPoolingClients(&connections)
-			fmt.Printf("Game between %v and %v\n", f, s)
-			for _, client := range connections {
-				client.outgoing <- "Game starting\n"
-			}
-		} else {
-			fmt.Println("Not enough clients yet")
-			for _, client := range connections {
-				client.outgoing <- "Waiting for others\n"
-			}
-		}
+		// if hasEnoughPoolingClients(connections) {
+		// 	f, s := findTwoPoolingClients(&connections)
+		// 	fmt.Printf("Game between %v and %v\n", f, s)
+		// 	for _, client := range connections {
+		// 		client.outgoing <- "Game starting\n"
+		// 	}
+		// } else {
+		// 	fmt.Println("Not enough clients yet")
+		// 	for _, client := range connections {
+		// 		client.outgoing <- "Waiting for others\n"
+		// 	}
+		// }
 	}
 }
